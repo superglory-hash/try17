@@ -91,7 +91,6 @@ import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -206,7 +205,6 @@ fun SeoulRadioAppScreen() {
     val liveIcyTitle by RadioPlaybackService.liveMetadataTitleFlow.collectAsState()
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    // ★ 수정 1: 앱을 켰을 때 '즐겨찾기' 방송이 먼저 보이도록 기본 카테고리를 FAVORITE으로 설정
     var selectedCategory by remember {
         mutableStateOf(
             if (StationRepository.getFavoriteIds(context).isNotEmpty()) {
@@ -260,7 +258,7 @@ fun SeoulRadioAppScreen() {
 
     val defaultLyricLines = remember {
         listOf(
-            "상단 [BGM 인식]은 ACRCloud + AudD 핑거프린팅으로 곡을 정밀 식별합니다",
+            "재생 중에는 화면 최상단에 대형 [🎵 BGM 노래 인식] 버튼이 항상 고정됩니다",
             "복사 아이콘을 누르면 [노래 제목 - 가수]만 클립보드에 깔끔하게 복사됩니다",
             "[🍈 멜론에서 보기]를 누르면 멜론 검색창에 노래 제목과 가수가 자동 입력됩니다",
             "앱 실행 시 즐겨찾기한 방송 목록이 가장 먼저 표시됩니다"
@@ -294,7 +292,6 @@ fun SeoulRadioAppScreen() {
         mutableStateOf<List<RecognizedSong>>(SongAndLyricsService.loadSavedSongs(context))
     }
 
-    // ★ 수정 2: 멜론 검색창에 넣을 '노래 제목 가수' 키워드 생성 및 클립보드 동시 복사
     fun buildCleanMelonKeyword(song: RecognizedSong): String {
         val isPlaceholder = song.id == "init_song" ||
             song.title.startsWith("현재 곡 미감지") ||
@@ -465,7 +462,6 @@ fun SeoulRadioAppScreen() {
         }
         .sortedByDescending { favoriteIds.contains(it.id) }
 
-    // 즐겨찾기 카테고리가 가장 왼쪽(첫 번째)에 보이도록 정렬
     val orderedCategories = remember {
         listOf(
             StationCategory.FAVORITE,
@@ -480,6 +476,7 @@ fun SeoulRadioAppScreen() {
 
     Scaffold(
         containerColor = Color(0xFF0B1120),
+        // ★ 재생 중 화면 최상단에 항상 고정되는 TopHeaderBar에 대형 BGM 인식 버튼 연결
         topBar = {
             TopHeaderBar(
                 isPlaying = isPlaying,
@@ -487,9 +484,12 @@ fun SeoulRadioAppScreen() {
                 currentProgram = currentProgram,
                 streamStatus = streamStatus,
                 remainingSleepSeconds = remainingSleepSeconds,
+                isRecognizingAudio = isRecognizingAudio,
                 onTogglePlay = { togglePlayPause() },
                 onStopPlay = { stopPlayback() },
                 onExitApp = { exitProgram() },
+                onRecognizeAudio5Sec = { triggerAudioRecognitionWithPermission() },
+                onOpenMelonSearch = { openMelonSearchModal() },
                 onOpenSleepModal = { showSleepTimerModal = true },
                 onOpenCustomUrlModal = { showCustomUrlModal = true },
                 onOpenApkGuideModal = { showApkGuideModal = true }
@@ -847,7 +847,6 @@ fun SeoulRadioAppScreen() {
                                     }
 
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        // 보관함에서도 [노래 제목 - 가수]만 복사하는 버튼 제공
                                         IconButton(
                                             onClick = { copySongTitleAndArtist(song, showToast = true) },
                                             modifier = Modifier.size(32.dp)
@@ -936,9 +935,6 @@ fun SeoulRadioAppScreen() {
     }
 }
 
-/**
- * ★ 수정 2: 멜론 웹페이지 내부 검색창(<input>)에 '노래 제목 가수'를 자동으로 채워 넣고 즉시 검색을 수행하는 모달
- */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun MelonSearchWebDialog(
@@ -961,7 +957,6 @@ fun MelonSearchWebDialog(
         }
     }
 
-    // 멜론 웹페이지 내 검색창 DOM(<input>)에 검색어를 강제로 입력하고 검색을 실행하는 JavaScript 주입 함수
     fun injectKeywordIntoMelonSearchBox(webView: WebView?, keyword: String, autoSubmit: Boolean) {
         val clean = keyword.trim()
         if (webView == null || clean.isBlank()) return
@@ -1071,11 +1066,9 @@ fun MelonSearchWebDialog(
                 super.onPageFinished(view, url)
                 CookieManager.getInstance().flush()
                 if (!isPopup && url != null) {
-                    // 로그인 후 멜론 홈으로 돌아왔을 때 검색어가 있으면 즉시 검색 페이지로 이동
                     if ((url == "https://m2.melon.com/" || url == "https://m.melon.com/") && searchInput.isNotBlank()) {
                         view?.loadUrl(buildMelonSearchUrl(searchInput))
                     } else if (searchInput.isNotBlank()) {
-                        // 멜론 웹페이지 내 검색 입력창(<input>)에 자동으로 노래 제목과 가수 채워 넣기
                         injectKeywordIntoMelonSearchBox(view, searchInput, autoSubmit = true)
                         view?.postDelayed({
                             injectKeywordIntoMelonSearchBox(view, searchInput, autoSubmit = false)
@@ -1138,7 +1131,6 @@ fun MelonSearchWebDialog(
             color = Color(0xFF0B1120)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // 상단 멜론 컨트롤 바
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1228,7 +1220,6 @@ fun MelonSearchWebDialog(
                     }
                 }
 
-                // 상단 검색어 입력 & 멜론 검색창 즉시 자동입력 바
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1413,6 +1404,10 @@ fun StationGridCard(
     }
 }
 
+/**
+ * ★ 화면 최상단에 고정되는 헤더 바
+ * - 재생 중(isPlaying)이거나 음원 분석 중일 때 대형 [🎵 BGM 노래 인식] 버튼이 상단에 항상 고정되어 언제든 즉시 누를 수 있습니다.
+ */
 @Composable
 fun TopHeaderBar(
     isPlaying: Boolean,
@@ -1420,9 +1415,12 @@ fun TopHeaderBar(
     currentProgram: String,
     streamStatus: String,
     remainingSleepSeconds: Int,
+    isRecognizingAudio: Boolean,
     onTogglePlay: () -> Unit,
     onStopPlay: () -> Unit,
     onExitApp: () -> Unit,
+    onRecognizeAudio5Sec: () -> Unit,
+    onOpenMelonSearch: () -> Unit,
     onOpenSleepModal: () -> Unit,
     onOpenCustomUrlModal: () -> Unit,
     onOpenApkGuideModal: () -> Unit
@@ -1441,7 +1439,7 @@ fun TopHeaderBar(
     val isBuffering = streamStatus.contains("해석") || streamStatus.contains("버퍼링") || streamStatus.contains("전환")
 
     Surface(
-        color = Color(0xFF0B1120).copy(alpha = 0.96f),
+        color = Color(0xFF0B1120).copy(alpha = 0.98f),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -1602,111 +1600,184 @@ fun TopHeaderBar(
                 }
             }
 
-            AnimatedVisibility(visible = isPlaying || isBuffering) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (isPlaying) Color(0xFF064E3B).copy(alpha = 0.55f) else Color(0xFF1E293B),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp)
-                        .border(
-                            width = 1.dp,
-                            color = if (isPlaying) Color(0xFF10B981).copy(alpha = 0.6f) else Color(0xFF38BDF8).copy(alpha = 0.4f),
-                            shape = RoundedCornerShape(12.dp)
-                        )
-                ) {
-                    Row(
+            // ★ 재생 중일 때 상단에 고정되는 상태 표시줄 + 대형 [🎵 BGM 노래 인식] 고정 버튼
+            AnimatedVisibility(visible = isPlaying || isBuffering || isRecognizingAudio) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isPlaying) Color(0xFF064E3B).copy(alpha = 0.55f) else Color(0xFF1E293B),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .padding(top = 6.dp)
+                            .border(
+                                width = 1.dp,
+                                color = if (isPlaying) Color(0xFF10B981).copy(alpha = 0.6f) else Color(0xFF38BDF8).copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(12.dp)
+                            )
                     ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .weight(1f)
-                                .clickable { onTogglePlay() }
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            FiveBarAudioEqualizer(isPlaying = isPlaying)
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                color = if (isPlaying) Color(0xFFEF4444) else Color(0xFF2563EB),
-                                shape = RoundedCornerShape(4.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onTogglePlay() }
                             ) {
+                                FiveBarAudioEqualizer(isPlaying = isPlaying)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    color = if (isPlaying) Color(0xFFEF4444) else Color(0xFF2563EB),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = if (isPlaying) "ON-AIR" else "BUFFER",
+                                        color = Color.White,
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = if (isPlaying) "ON-AIR" else "BUFFER",
+                                    text = "${currentStation.name} (${currentStation.frequencyText}) · ${currentProgram.ifBlank { currentStation.defaultProgram }}",
                                     color = Color.White,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
+
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "${currentStation.name} (${currentStation.frequencyText}) · ${currentProgram.ifBlank { currentStation.defaultProgram }}",
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = Color(0xFF0F172A),
+                                    modifier = Modifier.clickable { onStopPlay() }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Stop,
+                                            contentDescription = "재생 중지",
+                                            tint = Color(0xFFFACC15),
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Text(
+                                            text = "중지",
+                                            color = Color(0xFFFACC15),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(5.dp))
+
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = Color(0xFF7F1D1D),
+                                    modifier = Modifier.clickable { onExitApp() }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "앱 종료",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Text(
+                                            text = "종료",
+                                            color = Color.White,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // ★ 언제든 누르기 쉽도록 상단에 고정된 대형 BGM 인식 버튼 + 멜론 바로가기 버튼
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = onRecognizeAudio5Sec,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .border(
+                                    width = 1.5.dp,
+                                    color = Color(0xFF38BDF8),
+                                    shape = RoundedCornerShape(14.dp)
+                                ),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isRecognizingAudio) Color(0xFF1E3A8A) else Color(0xFF0284C7)
+                            ),
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp)
+                        ) {
+                            if (isRecognizingAudio) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.5.dp,
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "라디오 음원 분석 중 (5.5초)...",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.GraphicEq,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFDE047),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "🎵 지금 나오는 노래(BGM) 인식",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                            }
                         }
 
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = Color(0xFF0F172A),
-                                modifier = Modifier.clickable { onStopPlay() }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Stop,
-                                        contentDescription = "재생 중지",
-                                        tint = Color(0xFFFACC15),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(
-                                        text = "중지",
-                                        color = Color(0xFFFACC15),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.width(5.dp))
-
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = Color(0xFF7F1D1D),
-                                modifier = Modifier.clickable { onExitApp() }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = "앱 종료",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(13.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(2.dp))
-                                    Text(
-                                        text = "종료",
-                                        color = Color.White,
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
+                        Button(
+                            onClick = onOpenMelonSearch,
+                            modifier = Modifier.height(48.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CD3C)),
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp)
+                        ) {
+                            Text(
+                                text = "🍈 멜론",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color.Black
+                            )
                         }
                     }
                 }
@@ -1884,8 +1955,9 @@ fun NowPlayingHeroCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
+            // 1열: 라디오 채널 이동 및 재생/중지 컨트롤 + 가사 탭 이동 버튼
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1895,19 +1967,19 @@ fun NowPlayingHeroCard(
                     IconButton(
                         onClick = onPrevChannel,
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF0F172A))
                     ) {
                         Icon(Icons.Default.SkipPrevious, contentDescription = "이전 채널", tint = Color.White)
                     }
 
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     IconButton(
                         onClick = onTogglePlay,
                         modifier = Modifier
-                            .size(42.dp)
+                            .size(46.dp)
                             .clip(CircleShape)
                             .background(
                                 Brush.linearGradient(
@@ -1923,28 +1995,28 @@ fun NowPlayingHeroCard(
                             imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = "재생/일시정지",
                             tint = Color.White,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(26.dp)
                         )
                     }
 
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     IconButton(
                         onClick = onStopPlay,
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF0F172A))
                     ) {
                         Icon(Icons.Default.Stop, contentDescription = "재생 중지", tint = Color(0xFFFACC15))
                     }
 
-                    Spacer(modifier = Modifier.width(5.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
 
                     IconButton(
                         onClick = onNextChannel,
                         modifier = Modifier
-                            .size(34.dp)
+                            .size(38.dp)
                             .clip(CircleShape)
                             .background(Color(0xFF0F172A))
                     ) {
@@ -1952,42 +2024,89 @@ fun NowPlayingHeroCard(
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(
-                        onClick = onRecognizeAudio5Sec,
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                        shape = RoundedCornerShape(50)
-                    ) {
-                        if (isRecognizingAudio) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(13.dp),
-                                strokeWidth = 2.dp,
-                                color = Color(0xFF38BDF8)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("분석중", fontSize = 11.sp, color = Color(0xFF38BDF8))
-                        } else {
-                            Icon(
-                                Icons.Default.GraphicEq,
-                                contentDescription = null,
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text("BGM 인식", fontSize = 11.sp, color = Color(0xFF38BDF8))
-                        }
-                    }
+                Button(
+                    onClick = onJumpToLyrics,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
+                    shape = RoundedCornerShape(50)
+                ) {
+                    Icon(
+                        Icons.Default.Lyrics,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("가사 탭", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            }
 
-                    Spacer(modifier = Modifier.width(5.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-                    Button(
-                        onClick = onOpenMelonSearch,
-                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 6.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CD3C)),
-                        shape = RoundedCornerShape(50)
-                    ) {
-                        Text("🍈 멜론", fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.ExtraBold)
+            // ★ 2열: 훨씬 크게 확대한 대형 [🎵 BGM 노래 인식] 버튼 & [🍈 멜론 검색] 버튼
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = onRecognizeAudio5Sec,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .border(
+                            width = 1.5.dp,
+                            color = Color(0xFF38BDF8),
+                            shape = RoundedCornerShape(14.dp)
+                        ),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isRecognizingAudio) Color(0xFF1E3A8A) else Color(0xFF2563EB)
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    if (isRecognizingAudio) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.5.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "음원 핑거프린팅 분석 중...",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.GraphicEq,
+                            contentDescription = null,
+                            tint = Color(0xFFFDE047),
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "🎵 BGM 노래 인식 (클릭)",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
                     }
+                }
+
+                Button(
+                    onClick = onOpenMelonSearch,
+                    modifier = Modifier.height(50.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CD3C)),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp)
+                ) {
+                    Text(
+                        text = "🍈 멜론 검색",
+                        fontSize = 14.sp,
+                        color = Color.Black,
+                        fontWeight = FontWeight.Black
+                    )
                 }
             }
 
@@ -1995,7 +2114,7 @@ fun NowPlayingHeroCard(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 4.dp),
+                        .padding(top = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -2155,7 +2274,6 @@ fun RealtimeLyricsSection(
 ) {
     val context = LocalContext.current
 
-    // 현재 인식된 노래로부터 '노래 제목 가수' 검색어 추출
     fun currentSongKeyword(): String {
         return if (currentSong.id != "init_song" &&
             !currentSong.title.startsWith("현재 곡 미감지") &&
@@ -2358,7 +2476,6 @@ fun RealtimeLyricsSection(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // ★ 수정 2: 멜론에서 보기 클릭 시 멜론 검색창에 '노래 제목 가수'가 자동 입력되어 열림
                         Surface(
                             color = Color(0xFF00CD3C),
                             shape = RoundedCornerShape(8.dp),
@@ -2375,7 +2492,6 @@ fun RealtimeLyricsSection(
                             )
                         }
 
-                        // ★ 수정 3: 복사 버튼 클릭 시 가사 전체가 아닌 '노래 제목 - 가수'만 클립보드에 복사
                         IconButton(
                             onClick = onCopySongTitleArtist
                         ) {
@@ -2638,19 +2754,19 @@ fun ApkBuildGuideDialog(onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "• 앱을 실행하면 항상 [즐겨찾기]에 등록된 방송 목록이 가장 먼저 표시됩니다.",
+                    "• 라디오 재생 중에는 화면 최상단에 대형 [🎵 지금 나오는 노래(BGM) 인식] 버튼이 항상 고정되어, 어디서든 즉시 노래를 찾을 수 있습니다.",
                     color = Color(0xFF4ADE80),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "• [🍈 멜론에서 보기] 버튼을 누르면 멜론 웹페이지 내부 검색창에 [노래 제목 가수]가 자동으로 입력되고 즉시 검색됩니다.",
+                    "• 앱을 실행하면 항상 [즐겨찾기]에 등록된 방송 목록이 가장 먼저 표시됩니다.",
                     color = Color(0xFF38BDF8),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "• 가사 탭 및 노래 보관함의 [복사 아이콘]을 누르면 [노래 제목 - 가수]만 깔끔하게 클립보드에 복사됩니다.",
+                    "• [🍈 멜론에서 보기] 버튼을 누르면 멜론 검색창에 [노래 제목 가수]가 자동 입력되며, 복사 버튼을 누르면 [노래 제목 - 가수]만 복사됩니다.",
                     color = Color(0xFFFDE047),
                     fontSize = 12.sp
                 )
