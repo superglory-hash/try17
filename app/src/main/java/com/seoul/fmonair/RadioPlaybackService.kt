@@ -44,7 +44,6 @@ class RadioPlaybackService : MediaLibraryService() {
 
     companion object {
         private const val ROOT_ID = "seoul_fm_root"
-        // 상단 상태표시줄 아이콘이 숨겨지지 않도록 새 채널 ID 사용
         private const val NOTIFICATION_CHANNEL_ID = "seoul_fm_onair_status_v2"
         private const val NOTIFICATION_ID = 1001
 
@@ -74,12 +73,27 @@ class RadioPlaybackService : MediaLibraryService() {
         private val _liveMetadataTitleFlow = MutableStateFlow<String?>(null)
         val liveMetadataTitleFlow: StateFlow<String?> = _liveMetadataTitleFlow
 
-        // 상단 알림에서 [앱 종료] 클릭 시 MainActivity까지 완전히 닫기 위한 신호
         private val _shouldExitAppFlow = MutableStateFlow(false)
         val shouldExitAppFlow: StateFlow<Boolean> = _shouldExitAppFlow
 
         fun resetExitSignal() {
             _shouldExitAppFlow.value = false
+        }
+
+        /**
+         * 설정에서 즐겨찾기 프로그램명을 최신 정보로 업데이트했을 때 현재 채널 프로그램명 및 알림/위젯 즉시 반영
+         */
+        fun refreshProgramTitleNow(context: Context, newTitle: String) {
+            if (newTitle.isNotBlank()) {
+                _currentProgramFlow.value = newTitle
+                RadioWidgetReceiver.notifyWidgetUpdate(context)
+                if (_isPlayingFlow.value) {
+                    val intent = Intent(context, RadioPlaybackService::class.java).apply {
+                        action = ACTION_ENSURE_NOTIFICATION
+                    }
+                    context.startService(intent)
+                }
+            }
         }
     }
 
@@ -225,7 +239,6 @@ class RadioPlaybackService : MediaLibraryService() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            // IMPORTANCE_DEFAULT + 무음 설정으로 상단 상태표시줄에 아이콘이 항상 표시되도록 설정
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "수도권 FM 라디오 상단 재생 컨트롤",
@@ -256,7 +269,6 @@ class RadioPlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 1. 일시정지 / 재생 버튼
         val toggleIntent = Intent(this, RadioPlaybackService::class.java).apply { action = ACTION_TOGGLE_PLAY }
         val togglePi = PendingIntent.getService(
             this,
@@ -265,7 +277,6 @@ class RadioPlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 2. 재생 완전 중지 버튼
         val stopIntent = Intent(this, RadioPlaybackService::class.java).apply { action = ACTION_STOP_PLAYBACK }
         val stopPi = PendingIntent.getService(
             this,
@@ -274,7 +285,6 @@ class RadioPlaybackService : MediaLibraryService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        // 3. 프로그램 완전 종료 버튼
         val exitIntent = Intent(this, RadioPlaybackService::class.java).apply { action = ACTION_EXIT_APP }
         val exitPi = PendingIntent.getService(
             this,
@@ -414,12 +424,10 @@ class RadioPlaybackService : MediaLibraryService() {
                 val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 notificationManager.cancel(NOTIFICATION_ID)
 
-                // MainActivity 종료 트리거 후 서비스 완전 종료
                 _shouldExitAppFlow.value = true
                 stopSelf()
             }
             ACTION_ENSURE_NOTIFICATION -> {
-                // 홈 버튼을 눌러 백그라운드로 나갈 때 상단 알림 즉시 갱신 및 표시
                 val station = _currentStationFlow.value
                 val program = _currentProgramFlow.value
                 val playing = _isPlayingFlow.value || player?.isPlaying == true
@@ -440,11 +448,10 @@ class RadioPlaybackService : MediaLibraryService() {
     private fun resolveAndPlayStation(station: RadioStation) {
         hasRetriedFallback = false
         _currentStationFlow.value = station
-        val initialProgram = StationRepository.getScheduledProgramTitle(station)
+        val initialProgram = StationRepository.getLatestProgramTitle(this, station)
         _currentProgramFlow.value = initialProgram
         _streamStatusFlow.value = "${station.broadcaster} 온에어 주소 해석 중..."
 
-        // 재생 시작 즉시 상단 상태표시줄에 알림 등록
         promoteToForeground(buildPlaybackNotification(station, initialProgram, true))
         RadioWidgetReceiver.notifyWidgetUpdate(this)
 
@@ -508,7 +515,7 @@ class RadioPlaybackService : MediaLibraryService() {
         ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
             val stations = StationRepository.loadStations(this@RadioPlaybackService)
             val items = stations.map { station ->
-                val programTitle = StationRepository.getScheduledProgramTitle(station)
+                val programTitle = StationRepository.getLatestProgramTitle(this@RadioPlaybackService, station)
                 val meta = MediaMetadata.Builder()
                     .setTitle("${station.name} (${station.frequencyText})")
                     .setArtist("${station.broadcaster} · $programTitle")
