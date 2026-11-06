@@ -74,6 +74,7 @@ import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -197,6 +198,8 @@ fun SeoulRadioAppScreen() {
 
     var stations by remember { mutableStateOf(StationRepository.loadStations(context)) }
     var favoriteIds by remember { mutableStateOf(StationRepository.getFavoriteIds(context)) }
+    // ★ 즐겨찾기 및 전체 방송국의 최신 프로그램 이름 맵 상태
+    var liveProgramMap by remember { mutableStateOf(StationRepository.loadCachedProgramMap(context)) }
 
     val currentStation by RadioPlaybackService.currentStationFlow.collectAsState()
     val currentProgram by RadioPlaybackService.currentProgramFlow.collectAsState()
@@ -254,14 +257,20 @@ fun SeoulRadioAppScreen() {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+        // 앱 시작 시에도 백그라운드에서 즐겨찾기 방송 프로그램 이름 1회 자동 최신화
+        val refreshed = StationRepository.updateFavoriteStationsPrograms(context, currentStation.id)
+        liveProgramMap = refreshed
+        refreshed[currentStation.id]?.let { latest ->
+            RadioPlaybackService.refreshProgramTitleNow(context, latest)
+        }
     }
 
     val defaultLyricLines = remember {
         listOf(
             "재생 중에는 화면 최상단에 대형 [🎵 BGM 노래 인식] 버튼이 항상 고정됩니다",
+            "우측 상단 [설정(연필 아이콘)]에서 즐겨찾기 방송의 프로그램명을 최신 정보로 업데이트할 수 있습니다",
             "복사 아이콘을 누르면 [노래 제목 - 가수]만 클립보드에 깔끔하게 복사됩니다",
-            "[🍈 멜론에서 보기]를 누르면 멜론 검색창에 노래 제목과 가수가 자동 입력됩니다",
-            "앱 실행 시 즐겨찾기한 방송 목록이 가장 먼저 표시됩니다"
+            "[🍈 멜론에서 보기]를 누르면 멜론 검색창에 노래 제목과 가수가 자동 입력됩니다"
         )
     }
 
@@ -450,12 +459,12 @@ fun SeoulRadioAppScreen() {
                 else -> station.category == selectedCategory
             }
             val q = channelSearchQuery.trim()
-            val scheduledProg = StationRepository.getScheduledProgramTitle(station)
+            val latestProg = liveProgramMap[station.id] ?: StationRepository.getLatestProgramTitle(context, station)
             val matchesSearch = q.isEmpty() ||
                 station.name.contains(q, ignoreCase = true) ||
                 station.frequencyText.contains(q, ignoreCase = true) ||
                 station.defaultProgram.contains(q, ignoreCase = true) ||
-                scheduledProg.contains(q, ignoreCase = true) ||
+                latestProg.contains(q, ignoreCase = true) ||
                 station.broadcaster.contains(q, ignoreCase = true)
 
             matchesCategory && matchesSearch
@@ -474,14 +483,16 @@ fun SeoulRadioAppScreen() {
         )
     }
 
+    val activeHeroProgram = liveProgramMap[currentStation.id]?.takeIf { it.isNotBlank() }
+        ?: currentProgram.ifBlank { StationRepository.getLatestProgramTitle(context, currentStation) }
+
     Scaffold(
         containerColor = Color(0xFF0B1120),
-        // ★ 재생 중 화면 최상단에 항상 고정되는 TopHeaderBar에 대형 BGM 인식 버튼 연결
         topBar = {
             TopHeaderBar(
                 isPlaying = isPlaying,
                 currentStation = currentStation,
-                currentProgram = currentProgram,
+                currentProgram = activeHeroProgram,
                 streamStatus = streamStatus,
                 remainingSleepSeconds = remainingSleepSeconds,
                 isRecognizingAudio = isRecognizingAudio,
@@ -511,7 +522,7 @@ fun SeoulRadioAppScreen() {
                 item {
                     NowPlayingHeroCard(
                         station = currentStation,
-                        currentProgram = currentProgram,
+                        currentProgram = activeHeroProgram,
                         isPlaying = isPlaying,
                         streamStatus = streamStatus,
                         isFavorite = favoriteIds.contains(currentStation.id),
@@ -696,11 +707,12 @@ fun SeoulRadioAppScreen() {
                             ) {
                                 rowPair.forEach { station ->
                                     val isCurrent = station.id == currentStation.id
-                                    val displayProgram = if (isCurrent && currentProgram.isNotBlank()) {
-                                        currentProgram
-                                    } else {
-                                        StationRepository.getScheduledProgramTitle(station)
-                                    }
+                                    val displayProgram = liveProgramMap[station.id]?.takeIf { it.isNotBlank() }
+                                        ?: if (isCurrent && currentProgram.isNotBlank()) {
+                                            currentProgram
+                                        } else {
+                                            StationRepository.getLatestProgramTitle(context, station)
+                                        }
                                     Box(modifier = Modifier.weight(1f)) {
                                         StationGridCard(
                                             station = station,
@@ -727,7 +739,7 @@ fun SeoulRadioAppScreen() {
                     item {
                         RealtimeLyricsSection(
                             currentStation = currentStation,
-                            currentProgram = currentProgram,
+                            currentProgram = activeHeroProgram,
                             currentSong = currentSong,
                             activeLyricIndex = activeLyricLineIndex,
                             isFocusMode = isLyricsFocusMode,
@@ -909,6 +921,15 @@ fun SeoulRadioAppScreen() {
         CustomStreamUrlDialog(
             context = context,
             station = currentStation,
+            allStations = stations,
+            favoriteIds = favoriteIds,
+            currentProgramMap = liveProgramMap,
+            onUpdateFavoritePrograms = { updatedMap ->
+                liveProgramMap = updatedMap
+                updatedMap[currentStation.id]?.let { latestTitle ->
+                    RadioPlaybackService.refreshProgramTitleNow(context, latestTitle)
+                }
+            },
             onSaveSettings = { newUrl, newAuddToken, acrHost, acrKey, acrSecret ->
                 StationRepository.saveCustomStreamUrl(context, currentStation.id, newUrl)
                 SongAndLyricsService.saveAuddApiToken(context, newAuddToken)
@@ -1404,10 +1425,6 @@ fun StationGridCard(
     }
 }
 
-/**
- * ★ 화면 최상단에 고정되는 헤더 바
- * - 재생 중(isPlaying)이거나 음원 분석 중일 때 대형 [🎵 BGM 노래 인식] 버튼이 상단에 항상 고정되어 언제든 즉시 누를 수 있습니다.
- */
 @Composable
 fun TopHeaderBar(
     isPlaying: Boolean,
@@ -1568,7 +1585,7 @@ fun TopHeaderBar(
                     ) {
                         Icon(
                             Icons.Default.Edit,
-                            contentDescription = "ACRCloud/AudD 설정",
+                            contentDescription = "설정 및 즐겨찾기 프로그램 업데이트",
                             tint = Color(0xFF94A3B8),
                             modifier = Modifier.size(17.dp)
                         )
@@ -1600,7 +1617,6 @@ fun TopHeaderBar(
                 }
             }
 
-            // ★ 재생 중일 때 상단에 고정되는 상태 표시줄 + 대형 [🎵 BGM 노래 인식] 고정 버튼
             AnimatedVisibility(visible = isPlaying || isBuffering || isRecognizingAudio) {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Surface(
@@ -1713,7 +1729,6 @@ fun TopHeaderBar(
 
                     Spacer(modifier = Modifier.height(6.dp))
 
-                    // ★ 언제든 누르기 쉽도록 상단에 고정된 대형 BGM 인식 버튼 + 멜론 바로가기 버튼
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1957,7 +1972,6 @@ fun NowPlayingHeroCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // 1열: 라디오 채널 이동 및 재생/중지 컨트롤 + 가사 탭 이동 버튼
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2043,7 +2057,6 @@ fun NowPlayingHeroCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // ★ 2열: 훨씬 크게 확대한 대형 [🎵 BGM 노래 인식] 버튼 & [🍈 멜론 검색] 버튼
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2595,25 +2608,44 @@ fun SleepTimerDialog(
     )
 }
 
+/**
+ * ★ 설정 다이얼로그:
+ * 1) 즐겨찾기로 등록된 방송국의 현재 프로그램 이름을 최신 정보로 일괄 업데이트하는 기능
+ * 2) ACRCloud / AudD 오디오 핑거프린팅 설정 및 커스텀 스트림 URL 설정
+ */
 @Composable
 fun CustomStreamUrlDialog(
     context: Context,
     station: RadioStation,
+    allStations: List<RadioStation>,
+    favoriteIds: Set<String>,
+    currentProgramMap: Map<String, String>,
+    onUpdateFavoritePrograms: (Map<String, String>) -> Unit,
     onSaveSettings: (String?, String, String, String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val coroutineScope = rememberCoroutineScope()
     val acrConfig = remember { SongAndLyricsService.getAcrCloudConfig(context) }
+
     var inputUrl by remember { mutableStateOf(station.customStreamUrl ?: "") }
     var inputAcrHost by remember { mutableStateOf(acrConfig.host) }
     var inputAcrKey by remember { mutableStateOf(acrConfig.accessKey) }
     var inputAcrSecret by remember { mutableStateOf(acrConfig.accessSecret) }
     var inputAuddToken by remember { mutableStateOf(SongAndLyricsService.getAuddApiToken(context)) }
 
+    var isUpdatingPrograms by remember { mutableStateOf(false) }
+    var lastUpdatedText by remember { mutableStateOf(StationRepository.getLastProgramUpdateTimeText(context)) }
+    var localProgramMap by remember(currentProgramMap) { mutableStateOf(currentProgramMap) }
+
+    val favoriteStations = remember(allStations, favoriteIds) {
+        allStations.filter { favoriteIds.contains(it.id) }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Color(0xFF1E293B),
         title = {
-            Text("ACRCloud / AudD 핑거프린팅 & 스트림 설정", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text("설정 & 즐겨찾기 방송 프로그램 업데이트", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
         },
         text = {
             Column(
@@ -2621,8 +2653,126 @@ fun CustomStreamUrlDialog(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
+                // ★ 1. 즐겨찾기 방송국 프로그램 이름 최신 정보 업데이트 영역
+                Surface(
+                    color = Color(0xFF0F172A),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFF38BDF8).copy(alpha = 0.5f), RoundedCornerShape(14.dp))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "1. 즐겨찾기 방송국 프로그램 최신 업데이트 (${favoriteStations.size}개 채널)",
+                            color = Color(0xFFFDE047),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = "최근 상태: $lastUpdatedText",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 11.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Button(
+                            onClick = {
+                                if (!isUpdatingPrograms) {
+                                    isUpdatingPrograms = true
+                                    coroutineScope.launch {
+                                        val refreshed = StationRepository.updateFavoriteStationsPrograms(
+                                            context = context,
+                                            currentStationId = station.id
+                                        )
+                                        localProgramMap = refreshed
+                                        lastUpdatedText = StationRepository.getLastProgramUpdateTimeText(context)
+                                        onUpdateFavoritePrograms(refreshed)
+                                        isUpdatingPrograms = false
+                                        Toast.makeText(
+                                            context,
+                                            "즐겨찾기 ${favoriteStations.size}개 방송국의 프로그램 이름이 최신 정보로 업데이트되었습니다!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isUpdatingPrograms) Color(0xFF1E3A8A) else Color(0xFF2563EB)
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            if (isUpdatingPrograms) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("최신 편성·온에어 정보 수신 중...", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            } else {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFDE047),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "즐겨찾기 방송 프로그램 최신 정보 업데이트",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+
+                        if (favoriteStations.isNotEmpty()) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                favoriteStations.forEach { favStation ->
+                                    val prog = localProgramMap[favStation.id]
+                                        ?: StationRepository.getLatestProgramTitle(context, favStation)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "• ${favStation.name}",
+                                            color = Color(0xFF38BDF8),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = prog,
+                                            color = Color.White,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "즐겨찾기에 등록된 채널이 없습니다. 채널 카드 우측 상단 별(★)을 눌러 등록해 주세요.",
+                                color = Color(0xFF94A3B8),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
                 Text(
-                    text = "1. ACRCloud 오디오 핑거프린팅 설정 (1순위 추천)",
+                    text = "2. ACRCloud 오디오 핑거프린팅 설정 (1순위 추천)",
                     color = Color(0xFF4ADE80),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
@@ -2681,15 +2831,10 @@ fun CustomStreamUrlDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "2. AudD 오디오 핑거프린팅 API 토큰 (2순위 보조)",
+                    text = "3. AudD 오디오 핑거프린팅 API 토큰 (2순위 보조)",
                     color = Color(0xFF38BDF8),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "ACRCloud 미설정 시 사용됩니다. api.audd.io에서 발급받은 토큰을 입력할 수 있습니다.",
-                    color = Color(0xFF94A3B8),
-                    fontSize = 11.sp
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedTextField(
@@ -2709,7 +2854,7 @@ fun CustomStreamUrlDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "3. ${station.name} 커스텀 스트림 URL",
+                    text = "4. ${station.name} 커스텀 스트림 URL",
                     color = Color.White,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
@@ -2737,7 +2882,7 @@ fun CustomStreamUrlDialog(
         },
         confirmButton = {
             Button(onClick = { onSaveSettings(inputUrl, inputAuddToken, inputAcrHost, inputAcrKey, inputAcrSecret) }) {
-                Text("저장")
+                Text("닫기·저장")
             }
         }
     )
@@ -2754,20 +2899,20 @@ fun ApkBuildGuideDialog(onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "• 라디오 재생 중에는 화면 최상단에 대형 [🎵 지금 나오는 노래(BGM) 인식] 버튼이 항상 고정되어, 어디서든 즉시 노래를 찾을 수 있습니다.",
+                    "• 우측 상단 [설정(연필 아이콘)]을 눌러 [즐겨찾기 방송 프로그램 최신 정보 업데이트] 버튼을 클릭하면 즐겨찾기된 모든 방송국의 프로그램 이름이 즉시 최신 정보로 갱신됩니다.",
+                    color = Color(0xFFFDE047),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "• 라디오 재생 중에는 화면 최상단에 대형 [🎵 지금 나오는 노래(BGM) 인식] 버튼이 항상 고정되어 어디서든 즉시 노래를 찾을 수 있습니다.",
                     color = Color(0xFF4ADE80),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "• 앱을 실행하면 항상 [즐겨찾기]에 등록된 방송 목록이 가장 먼저 표시됩니다.",
-                    color = Color(0xFF38BDF8),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
                     "• [🍈 멜론에서 보기] 버튼을 누르면 멜론 검색창에 [노래 제목 가수]가 자동 입력되며, 복사 버튼을 누르면 [노래 제목 - 가수]만 복사됩니다.",
-                    color = Color(0xFFFDE047),
+                    color = Color(0xFF38BDF8),
                     fontSize = 12.sp
                 )
             }
