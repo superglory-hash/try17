@@ -137,6 +137,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class MainActivity : ComponentActivity() {
@@ -205,7 +206,16 @@ fun SeoulRadioAppScreen() {
     val liveIcyTitle by RadioPlaybackService.liveMetadataTitleFlow.collectAsState()
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
-    var selectedCategory by remember { mutableStateOf(StationCategory.ALL) }
+    // ★ 수정 1: 앱을 켰을 때 '즐겨찾기' 방송이 먼저 보이도록 기본 카테고리를 FAVORITE으로 설정
+    var selectedCategory by remember {
+        mutableStateOf(
+            if (StationRepository.getFavoriteIds(context).isNotEmpty()) {
+                StationCategory.FAVORITE
+            } else {
+                StationCategory.ALL
+            }
+        )
+    }
     var channelSearchQuery by remember { mutableStateOf("") }
 
     var isHeroCompact by remember { mutableStateOf(false) }
@@ -251,9 +261,9 @@ fun SeoulRadioAppScreen() {
     val defaultLyricLines = remember {
         listOf(
             "상단 [BGM 인식]은 ACRCloud + AudD 핑거프린팅으로 곡을 정밀 식별합니다",
-            "우측 상단 [연필 아이콘]에서 무료 ACRCloud 키 또는 AudD 토큰을 설정할 수 있습니다",
-            "[🍈 멜론] 창에서 [카카오계정 로그인]으로 로그인해 바로 검색·감상하세요",
-            "홈 버튼을 눌러도 상단 알림창에서 중지·종료할 수 있습니다"
+            "복사 아이콘을 누르면 [노래 제목 - 가수]만 클립보드에 깔끔하게 복사됩니다",
+            "[🍈 멜론에서 보기]를 누르면 멜론 검색창에 노래 제목과 가수가 자동 입력됩니다",
+            "앱 실행 시 즐겨찾기한 방송 목록이 가장 먼저 표시됩니다"
         )
     }
 
@@ -284,16 +294,40 @@ fun SeoulRadioAppScreen() {
         mutableStateOf<List<RecognizedSong>>(SongAndLyricsService.loadSavedSongs(context))
     }
 
+    // ★ 수정 2: 멜론 검색창에 넣을 '노래 제목 가수' 키워드 생성 및 클립보드 동시 복사
     fun buildCleanMelonKeyword(song: RecognizedSong): String {
-        val isPlaceholder = song.id == "init_song" || song.title.startsWith("현재 곡 미감지") || song.title.startsWith("BGM 인식")
+        val isPlaceholder = song.id == "init_song" ||
+            song.title.startsWith("현재 곡 미감지") ||
+            song.title.startsWith("BGM 인식")
         if (isPlaceholder) {
             return lyricsSearchQuery.trim()
         }
-        return "${song.artist} ${song.title}".trim()
+        return "${song.title} ${song.artist}".trim()
+    }
+
+    fun copySongTitleAndArtist(song: RecognizedSong, showToast: Boolean = true) {
+        val isPlaceholder = song.id == "init_song" ||
+            song.title.startsWith("현재 곡 미감지") ||
+            song.title.startsWith("BGM 인식")
+        val copyText = if (isPlaceholder) {
+            lyricsSearchQuery.trim().ifBlank { "${song.title} - ${song.artist}" }
+        } else {
+            "${song.title} - ${song.artist}"
+        }
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("song_title_artist", copyText))
+        if (showToast) {
+            Toast.makeText(context, "복사 완료: $copyText", Toast.LENGTH_SHORT).show()
+        }
     }
 
     fun openMelonSearchModal(customKeyword: String? = null) {
-        melonSearchKeyword = customKeyword ?: buildCleanMelonKeyword(currentSong)
+        val keyword = (customKeyword ?: buildCleanMelonKeyword(currentSong)).trim()
+        melonSearchKeyword = keyword
+        if (keyword.isNotBlank()) {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("melon_search", keyword))
+        }
         showMelonWebModal = true
     }
 
@@ -307,7 +341,7 @@ fun SeoulRadioAppScreen() {
             )
             if (!recognized.title.startsWith("현재 곡 미감지")) {
                 currentSong = recognized
-                lyricsSearchQuery = "${recognized.artist} ${recognized.title}".trim()
+                lyricsSearchQuery = "${recognized.title} ${recognized.artist}".trim()
                 savedSongsHistory = SongAndLyricsService.saveSongToHistory(context, recognized)
             }
         }
@@ -381,9 +415,9 @@ fun SeoulRadioAppScreen() {
             )
             currentSong = recognized
             if (!recognized.title.startsWith("현재 곡 미감지")) {
-                lyricsSearchQuery = "${recognized.artist} ${recognized.title}".trim()
+                lyricsSearchQuery = "${recognized.title} ${recognized.artist}".trim()
                 savedSongsHistory = SongAndLyricsService.saveSongToHistory(context, recognized)
-                Toast.makeText(context, "곡 인식 성공: ${recognized.artist} - ${recognized.title}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "곡 인식 성공: ${recognized.title} - ${recognized.artist}", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(context, "음원이 감지되지 않아 가사/멜론 검색 탭으로 이동합니다.", Toast.LENGTH_SHORT).show()
             }
@@ -411,22 +445,37 @@ fun SeoulRadioAppScreen() {
         }
     }
 
-    val filteredStations = stations.filter { station ->
-        val matchesCategory = when (selectedCategory) {
-            StationCategory.ALL -> true
-            StationCategory.FAVORITE -> favoriteIds.contains(station.id)
-            else -> station.category == selectedCategory
-        }
-        val q = channelSearchQuery.trim()
-        val scheduledProg = StationRepository.getScheduledProgramTitle(station)
-        val matchesSearch = q.isEmpty() ||
-            station.name.contains(q, ignoreCase = true) ||
-            station.frequencyText.contains(q, ignoreCase = true) ||
-            station.defaultProgram.contains(q, ignoreCase = true) ||
-            scheduledProg.contains(q, ignoreCase = true) ||
-            station.broadcaster.contains(q, ignoreCase = true)
+    val filteredStations = stations
+        .filter { station ->
+            val matchesCategory = when (selectedCategory) {
+                StationCategory.ALL -> true
+                StationCategory.FAVORITE -> favoriteIds.contains(station.id)
+                else -> station.category == selectedCategory
+            }
+            val q = channelSearchQuery.trim()
+            val scheduledProg = StationRepository.getScheduledProgramTitle(station)
+            val matchesSearch = q.isEmpty() ||
+                station.name.contains(q, ignoreCase = true) ||
+                station.frequencyText.contains(q, ignoreCase = true) ||
+                station.defaultProgram.contains(q, ignoreCase = true) ||
+                scheduledProg.contains(q, ignoreCase = true) ||
+                station.broadcaster.contains(q, ignoreCase = true)
 
-        matchesCategory && matchesSearch
+            matchesCategory && matchesSearch
+        }
+        .sortedByDescending { favoriteIds.contains(it.id) }
+
+    // 즐겨찾기 카테고리가 가장 왼쪽(첫 번째)에 보이도록 정렬
+    val orderedCategories = remember {
+        listOf(
+            StationCategory.FAVORITE,
+            StationCategory.ALL,
+            StationCategory.KBS,
+            StationCategory.MBC,
+            StationCategory.SBS,
+            StationCategory.NEWS_EDU,
+            StationCategory.MUSIC_RELIGION
+        )
     }
 
     Scaffold(
@@ -568,11 +617,16 @@ fun SeoulRadioAppScreen() {
                                     .horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                StationCategory.entries.forEach { category ->
+                                orderedCategories.forEach { category ->
+                                    val labelText = if (category == StationCategory.FAVORITE) {
+                                        "★ ${category.displayName} (${favoriteIds.size})"
+                                    } else {
+                                        category.displayName
+                                    }
                                     FilterChip(
                                         selected = selectedCategory == category,
                                         onClick = { selectedCategory = category },
-                                        label = { Text(category.displayName, fontSize = 12.sp) },
+                                        label = { Text(labelText, fontSize = 12.sp, fontWeight = FontWeight.Bold) },
                                         colors = FilterChipDefaults.filterChipColors(
                                             selectedContainerColor = Color(0xFF2563EB),
                                             selectedLabelColor = Color.White,
@@ -606,37 +660,64 @@ fun SeoulRadioAppScreen() {
                         }
                     }
 
-                    val rows = filteredStations.chunked(2)
-                    items(rows) { rowPair ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 5.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            rowPair.forEach { station ->
-                                val isCurrent = station.id == currentStation.id
-                                val displayProgram = if (isCurrent && currentProgram.isNotBlank()) {
-                                    currentProgram
-                                } else {
-                                    StationRepository.getScheduledProgramTitle(station)
-                                }
-                                Box(modifier = Modifier.weight(1f)) {
-                                    StationGridCard(
-                                        station = station,
-                                        programTitle = displayProgram,
-                                        isSelected = isCurrent,
-                                        isPlaying = isPlaying,
-                                        isFav = favoriteIds.contains(station.id),
-                                        onSelectStation = { playStation(station) },
-                                        onToggleFavorite = {
-                                            favoriteIds = StationRepository.toggleFavorite(context, station.id)
-                                        }
+                    if (selectedCategory == StationCategory.FAVORITE && filteredStations.isEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 36.dp, horizontal = 20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "즐겨찾기에 등록된 방송이 없습니다.",
+                                        color = Color(0xFF94A3B8),
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold
                                     )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Button(
+                                        onClick = { selectedCategory = StationCategory.ALL },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB))
+                                    ) {
+                                        Text("전체 방송 보기", color = Color.White)
+                                    }
                                 }
                             }
-                            if (rowPair.size == 1) {
-                                Spacer(modifier = Modifier.weight(1f))
+                        }
+                    } else {
+                        val rows = filteredStations.chunked(2)
+                        items(rows) { rowPair ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                rowPair.forEach { station ->
+                                    val isCurrent = station.id == currentStation.id
+                                    val displayProgram = if (isCurrent && currentProgram.isNotBlank()) {
+                                        currentProgram
+                                    } else {
+                                        StationRepository.getScheduledProgramTitle(station)
+                                    }
+                                    Box(modifier = Modifier.weight(1f)) {
+                                        StationGridCard(
+                                            station = station,
+                                            programTitle = displayProgram,
+                                            isSelected = isCurrent,
+                                            isPlaying = isPlaying,
+                                            isFav = favoriteIds.contains(station.id),
+                                            onSelectStation = { playStation(station) },
+                                            onToggleFavorite = {
+                                                favoriteIds = StationRepository.toggleFavorite(context, station.id)
+                                            }
+                                        )
+                                    }
+                                }
+                                if (rowPair.size == 1) {
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
                             }
                         }
                     }
@@ -671,8 +752,12 @@ fun SeoulRadioAppScreen() {
                             onOpenMelonWithQuery = { keyword ->
                                 openMelonSearchModal(keyword)
                             },
+                            onCopySongTitleArtist = {
+                                copySongTitleAndArtist(currentSong, showToast = true)
+                            },
                             onSelectSearchedSong = { chosen ->
                                 currentSong = chosen
+                                lyricsSearchQuery = "${chosen.title} ${chosen.artist}".trim()
                                 savedSongsHistory = SongAndLyricsService.saveSongToHistory(context, chosen)
                                 lrcSearchResults = emptyList()
                             }
@@ -732,6 +817,7 @@ fun SeoulRadioAppScreen() {
                                     .padding(horizontal = 14.dp, vertical = 5.dp)
                                     .clickable {
                                         currentSong = song
+                                        lyricsSearchQuery = "${song.title} ${song.artist}".trim()
                                         selectedTabIndex = 1
                                     }
                             ) {
@@ -761,11 +847,26 @@ fun SeoulRadioAppScreen() {
                                     }
 
                                     Row(verticalAlignment = Alignment.CenterVertically) {
+                                        // 보관함에서도 [노래 제목 - 가수]만 복사하는 버튼 제공
+                                        IconButton(
+                                            onClick = { copySongTitleAndArtist(song, showToast = true) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Default.ContentCopy,
+                                                contentDescription = "노래 제목 - 가수 복사",
+                                                tint = Color(0xFFCBD5E1),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+
+                                        Spacer(modifier = Modifier.width(4.dp))
+
                                         Surface(
                                             color = Color(0xFF00CD3C),
                                             shape = RoundedCornerShape(8.dp),
                                             modifier = Modifier.clickable {
-                                                openMelonSearchModal("${song.artist} ${song.title}")
+                                                openMelonSearchModal("${song.title} ${song.artist}")
                                             }
                                         ) {
                                             Text(
@@ -836,7 +937,7 @@ fun SeoulRadioAppScreen() {
 }
 
 /**
- * 카카오계정 새 창 팝업(window.open) 및 카카오톡 앱 간편로그인을 100% 지원하는 인앱 멜론 웹뷰 모달
+ * ★ 수정 2: 멜론 웹페이지 내부 검색창(<input>)에 '노래 제목 가수'를 자동으로 채워 넣고 즉시 검색을 수행하는 모달
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -845,18 +946,68 @@ fun MelonSearchWebDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var searchInput by remember { mutableStateOf(initialKeyword) }
+    var searchInput by remember(initialKeyword) { mutableStateOf(initialKeyword) }
     var mainWebViewRef by remember { mutableStateOf<WebView?>(null) }
     var popupWebViewRef by remember { mutableStateOf<WebView?>(null) }
     var containerRef by remember { mutableStateOf<FrameLayout?>(null) }
 
-    val targetSearchUrl = remember(initialKeyword) {
-        if (initialKeyword.isNotBlank()) {
-            val encoded = URLEncoder.encode(initialKeyword.trim(), "UTF-8")
+    fun buildMelonSearchUrl(keyword: String): String {
+        val trimmed = keyword.trim()
+        return if (trimmed.isNotBlank()) {
+            val encoded = URLEncoder.encode(trimmed, "UTF-8")
             "https://m2.melon.com/search/searchMcom.htm?q=$encoded"
         } else {
             "https://m2.melon.com/"
         }
+    }
+
+    // 멜론 웹페이지 내 검색창 DOM(<input>)에 검색어를 강제로 입력하고 검색을 실행하는 JavaScript 주입 함수
+    fun injectKeywordIntoMelonSearchBox(webView: WebView?, keyword: String, autoSubmit: Boolean) {
+        val clean = keyword.trim()
+        if (webView == null || clean.isBlank()) return
+        val escapedJsLiteral = JSONObject.quote(clean)
+        val jsCode = """
+            (function() {
+                var kw = $escapedJsLiteral;
+                var selectors = [
+                    'input[type="search"]',
+                    'input#top_search',
+                    'input[name="searchKeyword"]',
+                    'input[name="q"]',
+                    'input[name="schText"]',
+                    '.search_box input',
+                    '.search_input input',
+                    'input.input_text',
+                    'input[placeholder*="검색"]',
+                    'input[title*="검색"]'
+                ];
+                var targetInput = null;
+                for (var i = 0; i < selectors.length; i++) {
+                    var el = document.querySelector(selectors[i]);
+                    if (el) {
+                        targetInput = el;
+                        break;
+                    }
+                }
+                if (targetInput) {
+                    targetInput.value = kw;
+                    targetInput.setAttribute('value', kw);
+                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    if ($autoSubmit) {
+                        var btn = document.querySelector('button.btn_search, .btn_search, button[type="submit"], a.btn_search');
+                        if (btn && !window.__melonAutoSearched) {
+                            window.__melonAutoSearched = true;
+                            btn.click();
+                        } else if (targetInput.form && !window.__melonAutoSearched) {
+                            window.__melonAutoSearched = true;
+                            targetInput.form.submit();
+                        }
+                    }
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(jsCode, null)
     }
 
     fun handleCustomSchemeUrl(ctx: Context, view: WebView?, url: String): Boolean {
@@ -901,7 +1052,6 @@ fun MelonSearchWebDialog(
             domStorageEnabled = true
             databaseEnabled = true
             loadsImagesAutomatically = true
-            // ★ 카카오계정 로그인 팝업(window.open) 필수 설정
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -920,10 +1070,17 @@ fun MelonSearchWebDialog(
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 CookieManager.getInstance().flush()
-                // 로그인 완료 후 멜론 메인으로 리다이렉트되면 검색어가 있을 때 자동으로 검색 결과로 이동
-                if (!isPopup && url != null && (url == "https://m2.melon.com/" || url == "https://m.melon.com/") && searchInput.isNotBlank()) {
-                    val encoded = URLEncoder.encode(searchInput.trim(), "UTF-8")
-                    view?.loadUrl("https://m2.melon.com/search/searchMcom.htm?q=$encoded")
+                if (!isPopup && url != null) {
+                    // 로그인 후 멜론 홈으로 돌아왔을 때 검색어가 있으면 즉시 검색 페이지로 이동
+                    if ((url == "https://m2.melon.com/" || url == "https://m.melon.com/") && searchInput.isNotBlank()) {
+                        view?.loadUrl(buildMelonSearchUrl(searchInput))
+                    } else if (searchInput.isNotBlank()) {
+                        // 멜론 웹페이지 내 검색 입력창(<input>)에 자동으로 노래 제목과 가수 채워 넣기
+                        injectKeywordIntoMelonSearchBox(view, searchInput, autoSubmit = true)
+                        view?.postDelayed({
+                            injectKeywordIntoMelonSearchBox(view, searchInput, autoSubmit = false)
+                        }, 600L)
+                    }
                 }
             }
         }
@@ -959,10 +1116,8 @@ fun MelonSearchWebDialog(
                 }
                 popupWebViewRef = null
                 CookieManager.getInstance().flush()
-                // 카카오 팝업 로그인이 끝나고 닫히면 부모 웹뷰 새로고침/검색 실행
                 if (searchInput.isNotBlank()) {
-                    val encoded = URLEncoder.encode(searchInput.trim(), "UTF-8")
-                    mainWebViewRef?.loadUrl("https://m2.melon.com/search/searchMcom.htm?q=$encoded")
+                    mainWebViewRef?.loadUrl(buildMelonSearchUrl(searchInput))
                 } else {
                     mainWebViewRef?.reload()
                 }
@@ -1031,7 +1186,6 @@ fun MelonSearchWebDialog(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // 카카오/멜론 통합 로그인 화면 열기
                         Surface(
                             color = Color(0xFFFEE500),
                             shape = RoundedCornerShape(6.dp),
@@ -1041,7 +1195,7 @@ fun MelonSearchWebDialog(
                                     p.destroy()
                                     popupWebViewRef = null
                                 }
-                                val retUrl = URLEncoder.encode(targetSearchUrl, "UTF-8")
+                                val retUrl = URLEncoder.encode(buildMelonSearchUrl(searchInput), "UTF-8")
                                 mainWebViewRef?.loadUrl("https://member.melon.com/muid/mobile/login/login_inform.htm?returnPage=$retUrl")
                             }
                         ) {
@@ -1060,13 +1214,7 @@ fun MelonSearchWebDialog(
                             onClick = {
                                 val q = searchInput.trim()
                                 try {
-                                    val encoded = URLEncoder.encode(q, "UTF-8")
-                                    val externalUrl = if (q.isNotBlank()) {
-                                        "https://m2.melon.com/search/searchMcom.htm?q=$encoded"
-                                    } else {
-                                        "https://m2.melon.com"
-                                    }
-                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl)))
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(buildMelonSearchUrl(q))))
                                 } catch (_: Exception) {
                                 }
                             }
@@ -1080,20 +1228,7 @@ fun MelonSearchWebDialog(
                     }
                 }
 
-                // 안내 배너 (카카오계정 vs 구 멜론아이디 구분 안내)
-                Surface(
-                    color = Color(0xFF1E293B),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "💡 팁: 카카오 연동 회원은 반드시 노란색 [카카오계정 로그인]을 눌러주세요. (일반 멜론아이디 탭에 이메일을 입력하면 '없는 회원'으로 표시됩니다)",
-                        color = Color(0xFFFDE047),
-                        fontSize = 10.sp,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
-                }
-
-                // 검색어 입력 바
+                // 상단 검색어 입력 & 멜론 검색창 즉시 자동입력 바
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1104,7 +1239,7 @@ fun MelonSearchWebDialog(
                     OutlinedTextField(
                         value = searchInput,
                         onValueChange = { searchInput = it },
-                        placeholder = { Text("한국어 가수·제목 입력", fontSize = 12.sp, color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("노래 제목 가수 (자동 입력됨)", fontSize = 12.sp, color = Color(0xFF94A3B8)) },
                         singleLine = true,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(10.dp),
@@ -1117,7 +1252,7 @@ fun MelonSearchWebDialog(
                             unfocusedTextColor = Color.White
                         )
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Button(
                         onClick = {
                             popupWebViewRef?.let { p ->
@@ -1126,19 +1261,21 @@ fun MelonSearchWebDialog(
                                 popupWebViewRef = null
                             }
                             if (searchInput.isNotBlank()) {
-                                val encoded = URLEncoder.encode(searchInput.trim(), "UTF-8")
-                                mainWebViewRef?.loadUrl("https://m2.melon.com/search/searchMcom.htm?q=$encoded")
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("melon_search", searchInput.trim()))
+                                mainWebViewRef?.loadUrl(buildMelonSearchUrl(searchInput))
+                                injectKeywordIntoMelonSearchBox(mainWebViewRef, searchInput, autoSubmit = true)
                             }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CD3C)),
                         shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp),
                         modifier = Modifier.height(48.dp)
                     ) {
-                        Text("멜론 검색", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                        Text("검색창 자동입력·검색", color = Color.Black, fontWeight = FontWeight.ExtraBold, fontSize = 11.sp)
                     }
                 }
 
-                // 메인 웹뷰 + 카카오 팝업 웹뷰를 담는 FrameLayout 컨테이너
                 AndroidView(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1152,7 +1289,7 @@ fun MelonSearchWebDialog(
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
                             addView(mainWv)
-                            mainWv.loadUrl(targetSearchUrl)
+                            mainWv.loadUrl(buildMelonSearchUrl(initialKeyword))
 
                             mainWebViewRef = mainWv
                             containerRef = this
@@ -2013,9 +2150,22 @@ fun RealtimeLyricsSection(
     onSearchQueryChange: (String) -> Unit,
     onExecuteLrcSearch: () -> Unit,
     onOpenMelonWithQuery: (String) -> Unit,
+    onCopySongTitleArtist: () -> Unit,
     onSelectSearchedSong: (RecognizedSong) -> Unit
 ) {
     val context = LocalContext.current
+
+    // 현재 인식된 노래로부터 '노래 제목 가수' 검색어 추출
+    fun currentSongKeyword(): String {
+        return if (currentSong.id != "init_song" &&
+            !currentSong.title.startsWith("현재 곡 미감지") &&
+            !currentSong.title.startsWith("BGM 인식")
+        ) {
+            "${currentSong.title} ${currentSong.artist}".trim()
+        } else {
+            searchQuery.trim()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -2060,12 +2210,7 @@ fun RealtimeLyricsSection(
                 Spacer(modifier = Modifier.width(6.dp))
                 Button(
                     onClick = {
-                        val q = searchQuery.ifBlank {
-                            if (currentSong.id != "init_song" && !currentSong.title.startsWith("현재 곡 미감지")) {
-                                "${currentSong.artist} ${currentSong.title}"
-                            } else ""
-                        }
-                        onOpenMelonWithQuery(q)
+                        onOpenMelonWithQuery(searchQuery.ifBlank { currentSongKeyword() })
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CD3C)),
                     shape = RoundedCornerShape(12.dp),
@@ -2097,7 +2242,7 @@ fun RealtimeLyricsSection(
                                     Text(item.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                     Text("${item.artist} · ${item.album}", color = Color(0xFF94A3B8), fontSize = 11.sp)
                                 }
-                                Text("가사 보기", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text("선택·가사 보기", color = Color(0xFF38BDF8), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -2118,10 +2263,7 @@ fun RealtimeLyricsSection(
                     modifier = Modifier
                         .border(1.dp, Color(0xFF00CD3C), RoundedCornerShape(50))
                         .clickable {
-                            val q = if (currentSong.id != "init_song" && !currentSong.title.startsWith("현재 곡 미감지")) {
-                                "${currentSong.artist} ${currentSong.title}"
-                            } else searchQuery
-                            onOpenMelonWithQuery(q)
+                            onOpenMelonWithQuery(currentSongKeyword())
                         }
                 ) {
                     Row(
@@ -2216,14 +2358,12 @@ fun RealtimeLyricsSection(
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // ★ 수정 2: 멜론에서 보기 클릭 시 멜론 검색창에 '노래 제목 가수'가 자동 입력되어 열림
                         Surface(
                             color = Color(0xFF00CD3C),
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.clickable {
-                                val q = if (currentSong.id != "init_song" && !currentSong.title.startsWith("현재 곡 미감지")) {
-                                    "${currentSong.artist} ${currentSong.title}"
-                                } else searchQuery
-                                onOpenMelonWithQuery(q)
+                                onOpenMelonWithQuery(currentSongKeyword())
                             }
                         ) {
                             Text(
@@ -2235,14 +2375,15 @@ fun RealtimeLyricsSection(
                             )
                         }
 
+                        // ★ 수정 3: 복사 버튼 클릭 시 가사 전체가 아닌 '노래 제목 - 가수'만 클립보드에 복사
                         IconButton(
-                            onClick = {
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("lyrics", currentSong.plainLyrics))
-                                Toast.makeText(context, "가사 전체가 클립보드에 복사되었습니다.", Toast.LENGTH_SHORT).show()
-                            }
+                            onClick = onCopySongTitleArtist
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = "가사 복사", tint = Color(0xFFCBD5E1))
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "노래 제목 - 가수 복사",
+                                tint = Color(0xFFCBD5E1)
+                            )
                         }
 
                         TextButton(onClick = onToggleFocusMode) {
@@ -2492,24 +2633,24 @@ fun ApkBuildGuideDialog(onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         containerColor = Color(0xFF1E293B),
         title = {
-            Text("ACRCloud 핑거프린팅 & 멜론 로그인 팁", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            Text("앱 주요 기능 안내", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "• [BGM 인식]은 16kHz 광대역 녹음과 자동 음량 증폭을 거친 뒤 ACRCloud 및 AudD 오디오 핑거프린팅 엔진으로 곡을 식별합니다.",
+                    "• 앱을 실행하면 항상 [즐겨찾기]에 등록된 방송 목록이 가장 먼저 표시됩니다.",
                     color = Color(0xFF4ADE80),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "• 우측 상단 [연필 아이콘]을 눌러 무료 ACRCloud 키(Host / Access Key / Secret)를 입력해 두면 한국 가요·팝송 인식률이 대폭 올라갑니다.",
+                    "• [🍈 멜론에서 보기] 버튼을 누르면 멜론 웹페이지 내부 검색창에 [노래 제목 가수]가 자동으로 입력되고 즉시 검색됩니다.",
                     color = Color(0xFF38BDF8),
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    "• [🍈 멜론] 창에서 로그인할 때 카카오 연동 회원은 노란색 [카카오·멜론 로그인] -> [카카오계정 로그인]을 눌러주세요.",
+                    "• 가사 탭 및 노래 보관함의 [복사 아이콘]을 누르면 [노래 제목 - 가수]만 깔끔하게 클립보드에 복사됩니다.",
                     color = Color(0xFFFDE047),
                     fontSize = 12.sp
                 )
