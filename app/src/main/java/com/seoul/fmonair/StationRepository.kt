@@ -2,13 +2,20 @@ package com.seoul.fmonair
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
+import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object StationRepository {
@@ -16,6 +23,12 @@ object StationRepository {
     private const val PREFS_NAME = "seoul_fm_radio_prefs"
     private const val KEY_FAVORITES = "favorite_station_ids"
     private const val KEY_CUSTOM_URL_PREFIX = "custom_url_"
+    private const val KEY_PROGRAM_TITLE_PREFIX = "latest_program_title_"
+    private const val KEY_PROGRAM_HOUR_PREFIX = "latest_program_hour_"
+    private const val KEY_PROGRAM_UPDATED_TIME = "latest_program_updated_at"
+
+    // 실시간 업데이트된 방송국별 프로그램 이름 메모리 캐시
+    private val liveProgramCache = ConcurrentHashMap<String, String>()
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(6, TimeUnit.SECONDS)
@@ -215,7 +228,6 @@ object StationRepository {
             scheduleHours = "24시간 전통·퓨전 국악",
             playlistWebUrl = "https://www.igbf.kr"
         ),
-        // ★ 수정 1: CBS 표준FM 실제 작동 도메인(m-aac.cbs.co.kr) 및 백업 도메인(aac.cbs.co.kr) 적용
         RadioStation(
             id = "cbs_sfm",
             name = "CBS 표준FM",
@@ -231,7 +243,6 @@ object StationRepository {
             scheduleHours = "24시간 시사 & 교양",
             playlistWebUrl = "https://www.cbs.co.kr/radio"
         ),
-        // ★ 수정 2: CBS 음악FM 실제 작동 도메인(m-aac.cbs.co.kr) 및 백업 도메인(aac.cbs.co.kr) 적용
         RadioStation(
             id = "cbs_musicfm",
             name = "CBS 음악FM",
@@ -247,7 +258,6 @@ object StationRepository {
             scheduleHours = "24시간 아름다운 팝 & 가요",
             playlistWebUrl = "https://www.cbs.co.kr/radio"
         ),
-        // ★ 수정 3: FEBC 서울극동방송 실제 Wowza 서버(mlive2.febc.net:1935) 및 백업 서버 적용
         RadioStation(
             id = "febc_fm",
             name = "FEBC 극동방송",
@@ -325,6 +335,91 @@ object StationRepository {
         }
         prefs.edit().putStringSet(KEY_FAVORITES, current).apply()
         return current
+    }
+
+    private fun currentKstHourKey(): String {
+        val sdf = SimpleDateFormat("yyyyMMdd_HH", Locale.KOREA)
+        sdf.timeZone = TimeZone.getTimeZone("Asia/Seoul")
+        return sdf.format(Date())
+    }
+
+    /**
+     * 가장 최근에 업데이트된 프로그램 이름을 반환합니다.
+     * 현재 시간대(Hour)에 업데이트된 캐시가 있으면 최우선 반환하고, 없으면 시간대별 편성표를 반환합니다.
+     */
+    fun getLatestProgramTitle(context: Context, station: RadioStation): String {
+        val cachedInMemory = liveProgramCache[station.id]
+        if (!cachedInMemory.isNullOrBlank()) {
+            return cachedInMemory
+        }
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedHour = prefs.getString(KEY_PROGRAM_HOUR_PREFIX + station.id, "")
+        val savedTitle = prefs.getString(KEY_PROGRAM_TITLE_PREFIX + station.id, null)
+        if (savedHour == currentKstHourKey() && !savedTitle.isNullOrBlank()) {
+            liveProgramCache[station.id] = savedTitle
+            return savedTitle
+        }
+        return getScheduledProgramTitle(station)
+    }
+
+    fun loadCachedProgramMap(context: Context): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        initialStations.forEach { station ->
+            map[station.id] = getLatestProgramTitle(context, station)
+        }
+        return map
+    }
+
+    fun getLastProgramUpdateTimeText(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_PROGRAM_UPDATED_TIME, "아직 수동 업데이트 기록 없음")
+            ?: "아직 수동 업데이트 기록 없음"
+    }
+
+    /**
+     * ★ 설정에서 클릭 시 즐겨찾기로 등록된 모든 방송국의 프로그램 이름을 실시간으로 조회·업데이트합니다.
+     */
+    suspend fun updateFavoriteStationsPrograms(
+        context: Context,
+        currentStationId: String? = null
+    ): Map<String, String> = withContext(Dispatchers.IO) {
+        val favIds = getFavoriteIds(context).toMutableSet()
+        if (!currentStationId.isNullOrBlank()) {
+            favIds.add(currentStationId)
+        }
+        val targetStations = initialStations.filter { favIds.contains(it.id) }
+            .ifEmpty { initialStations.take(4) }
+
+        val updatedPairs = supervisorScope {
+            targetStations.map { station ->
+                async {
+                    val freshTitle = resolveCurrentProgramTitle(station)
+                    station.id to freshTitle
+                }
+            }.awaitAll()
+        }
+
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+        val hourKey = currentKstHourKey()
+
+        val sdf = SimpleDateFormat("MM.dd HH:mm:ss", Locale.KOREA)
+        sdf.timeZone = TimeZone.getTimeZone("Asia/Seoul")
+        val nowStamp = "${sdf.format(Date())} 최신 업데이트됨"
+
+        updatedPairs.forEach { (stationId, title) ->
+            liveProgramCache[stationId] = title
+            editor.putString(KEY_PROGRAM_TITLE_PREFIX + stationId, title)
+            editor.putString(KEY_PROGRAM_HOUR_PREFIX + stationId, hourKey)
+        }
+        editor.putString(KEY_PROGRAM_UPDATED_TIME, nowStamp)
+        editor.apply()
+
+        val result = mutableMapOf<String, String>()
+        initialStations.forEach { st ->
+            result[st.id] = liveProgramCache[st.id] ?: getLatestProgramTitle(context, st)
+        }
+        return@withContext result
     }
 
     fun getScheduledProgramTitle(station: RadioStation): String {
@@ -539,6 +634,7 @@ object StationRepository {
                             val match = titleRegex.find(body)
                             val found = match?.groupValues?.getOrNull(1)?.trim()
                             if (!found.isNullOrBlank()) {
+                                liveProgramCache[station.id] = found
                                 return@withContext found
                             }
                         }
@@ -561,13 +657,17 @@ object StationRepository {
                                 val ch = obj.optString("Channel", obj.optString("Type", ""))
                                 val title = obj.optString("Title", obj.optString("ProgTitle", "")).trim()
                                 if (ch.equals(targetCode, ignoreCase = true) && title.isNotBlank()) {
+                                    liveProgramCache[station.id] = title
                                     return@withContext title
                                 }
                             }
                         } else if (body.startsWith("{")) {
                             val json = JSONObject(body)
                             val title = json.optString("Title", json.optString("ProgTitle", "")).trim()
-                            if (title.isNotBlank()) return@withContext title
+                            if (title.isNotBlank()) {
+                                liveProgramCache[station.id] = title
+                                return@withContext title
+                            }
                         }
                     }
                 }
@@ -587,6 +687,7 @@ object StationRepository {
                             val info = onair?.optJSONObject("info")
                             val title = info?.optString("title", "")?.trim()
                             if (!title.isNullOrBlank()) {
+                                liveProgramCache[station.id] = title
                                 return@withContext title
                             }
                         }
@@ -597,13 +698,10 @@ object StationRepository {
             }
         } catch (_: Exception) {
         }
+        liveProgramCache[station.id] = scheduledFallback
         return@withContext scheduledFallback
     }
 
-    /**
-     * STATIC_HLS 채널에 fallbackStreamUrl이 있는 경우, 1순위 주소가 응답하지 않으면
-     * 자동으로 fallbackStreamUrl을 선택해 반환합니다.
-     */
     private fun isHlsEndpointAlive(url: String): Boolean {
         return try {
             val req = Request.Builder()
