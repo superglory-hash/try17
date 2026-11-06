@@ -376,11 +376,7 @@ object SongAndLyricsService {
     }
 
     /**
-     * 정밀 오디오 핑거프린팅(ACRCloud + AudD) 및 방송사 선곡표 결합 엔진:
-     * 1순위: 16kHz 고감도 오디오 녹음(자동 음량 증폭) -> ACRCloud 핑거프린팅 -> AudD 핑거프린팅
-     * 2순위: 스트림 실시간 ICY 태그
-     * 3순위: 방송사(KBS/MBC/SBS) 실시간 온에어 선곡표 API
-     * 4순위: 인식된 곡명을 한국어 제목·가수로 자동 변환
+     * 정밀 오디오 핑거프린팅(ACRCloud + AudD) 및 방송사 선곡표 결합 엔진
      */
     suspend fun recognizeCurrentRadioSong(
         context: Context,
@@ -601,8 +597,6 @@ object SongAndLyricsService {
 
     /**
      * 오디오 핑거프린팅(ACRCloud / AudD) 전용 16000Hz 광대역 녹음 + 자동 음량 증폭(Peak Normalization)
-     * - VOICE_RECOGNITION 소스를 사용하여 안드로이드 기본 노이즈 캔슬링이 음악 소리를 지우는 현상 방지
-     * - 녹음된 PCM 파형이 작을 경우 자동으로 최대 12배까지 디지털 증폭하여 핑거프린팅 인식률 극대화
      */
     @SuppressLint("MissingPermission")
     private fun recordHighQualityWavAudio(): ByteArray? {
@@ -614,7 +608,7 @@ object SongAndLyricsService {
 
         var recorder: AudioRecord? = null
         return try {
-            recorder = try {
+            val activeRecorder: AudioRecord = try {
                 AudioRecord(
                     MediaRecorder.AudioSource.VOICE_RECOGNITION,
                     sampleRate,
@@ -631,20 +625,21 @@ object SongAndLyricsService {
                     minBuf * 4
                 )
             }
+            recorder = activeRecorder
 
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                recorder.release()
+            if (activeRecorder.state != AudioRecord.STATE_INITIALIZED) {
+                activeRecorder.release()
                 return null
             }
 
-            recorder.startRecording()
+            activeRecorder.startRecording()
             val pcmShorts = ArrayList<Short>(sampleRate * 6)
             val readBuffer = ShortArray(minBuf / 2)
             val endTime = System.currentTimeMillis() + 5500L
 
             var maxPeak = 1
             while (System.currentTimeMillis() < endTime) {
-                val readCount = recorder.read(readBuffer, 0, readBuffer.size)
+                val readCount = activeRecorder.read(readBuffer, 0, readBuffer.size)
                 if (readCount > 0) {
                     for (i in 0 until readCount) {
                         val s = readBuffer[i]
@@ -654,13 +649,12 @@ object SongAndLyricsService {
                     }
                 }
             }
-            recorder.stop()
-            recorder.release()
+            activeRecorder.stop()
+            activeRecorder.release()
             recorder = null
 
             if (pcmShorts.isEmpty()) return null
 
-            // 디지털 자동 음량 증폭 (라디오 볼륨이 작아도 핑거프린트 피크가 선명하게 잡히도록 보정)
             val targetPeak = 28000.0f
             val gain = (targetPeak / maxPeak.toFloat()).coerceIn(1.0f, 12.0f)
 
